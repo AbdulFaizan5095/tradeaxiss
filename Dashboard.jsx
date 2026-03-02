@@ -1,0 +1,3145 @@
+// frontend/src/pages/Dashboard.jsx
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { toast } from 'react-hot-toast';
+
+import useAuthStore from '../store/authStore';
+import useTradingStore from '../store/tradingStore';
+import useMarketStore from '../store/marketStore';
+import useWatchlistStore from '../store/watchlistStore';
+import useSettingsStore from '../store/settingsStore';
+import AdminPanelPage from '../pages/AdminPanel';
+import AdminWithdrawals from '../components/admin/AdminWithdrawals';
+
+import socketService from '../services/socket';
+import api from '../services/api';
+
+import {
+  Search,
+  TrendingUp,
+  TrendingDown,
+  BarChart2,
+  List,
+  Clock,
+  Star,
+  Plus,
+  Wallet as WalletIcon,
+  ChevronDown,
+  ChevronUp,
+  Settings,
+  LogOut,
+  RefreshCw,
+  Trash2,
+  Edit3,
+  X,
+  Crosshair,
+  Maximize2,
+  Minimize2,
+  MessageSquare,
+  Bell,
+  Info,
+  User,
+  Eye,
+  EyeOff,
+  UserPlus,
+  Users,
+  ArrowRightLeft,
+  DollarSign,
+  Percent,
+  AlertTriangle,
+  Lock,
+  FolderPlus,
+  MoreVertical,
+} from 'lucide-react';
+
+import PriceChart from '../components/charts/PriceChart';
+import WalletPage from '../components/account/Wallet';
+import AdminUsers from '../components/admin/AdminUsers';
+import AdminPanel from '../components/admin/AdminPanel';
+
+// Desktop components
+import DesktopTerminal from '../components/mt5/DesktopTerminal';
+import MarketWatchPanel from '../components/mt5/MarketWatchPanel';
+import NavigatorPanel from '../components/mt5/NavigatorPanel';
+import ChartWorkspace from '../components/mt5/ChartWorkspace';
+import OrderDockPanel from '../components/mt5/OrderDockPanel';
+import ToolboxPanel from '../components/mt5/ToolboxPanel';
+
+// ============ CONSTANTS ============
+const TIMEFRAMES = [
+  { id: 'M1', label: 'M1', value: '1m' },
+  { id: 'M5', label: 'M5', value: '5m' },
+  { id: 'M15', label: 'M15', value: '15m' },
+  { id: 'M30', label: 'M30', value: '30m' },
+  { id: 'H1', label: 'H1', value: '1h' },
+  { id: 'H4', label: 'H4', value: '4h' },
+  { id: 'D1', label: 'D1', value: '1d' },
+  { id: 'W1', label: 'W1', value: '1w' },
+  { id: 'MN', label: 'MN', value: '1M' },
+];
+
+const CHART_TYPES = [
+  { id: 'candles', label: 'Candles' },
+  { id: 'bars', label: 'Bars' },
+  { id: 'line', label: 'Line' },
+];
+
+const SYMBOL_CATEGORIES = [
+  { id: 'all', label: 'All' },
+  { id: 'index_futures', label: 'Index Futures' },
+  { id: 'stock_futures', label: 'Stock Futures' },
+  { id: 'commodity_futures', label: 'Commodities' },
+];
+
+const HISTORY_PERIODS = [
+  { id: 'today', label: 'Today' },
+  { id: 'week', label: 'Last Week' },
+  { id: 'month', label: 'Last Month' },
+  { id: '3months', label: 'Last 3 Months' },
+];
+
+// ============ CATEGORY HELPERS ============
+const norm = (v) => String(v || '').toLowerCase().trim();
+
+const inferIndianCategory = (sym) => {
+  const c = norm(sym.category);
+  const seg = norm(sym.segment);
+  const inst = norm(sym.instrument_type);
+  const name = norm(sym.display_name);
+  const s = String(sym.symbol || '').toUpperCase();
+
+  const looksLikeIndex =
+    /NIFTY|SENSEX|BANKNIFTY|FINNIFTY|MIDCPNIFTY/i.test(s) ||
+    c.includes('index') ||
+    c.includes('indices') ||
+    seg.includes('index') ||
+    inst.includes('index') ||
+    name.includes('nifty') ||
+    name.includes('sensex');
+
+  if (looksLikeIndex) return 'indices';
+
+  const looksLikeEtf =
+    c === 'etf' || seg === 'etf' || inst === 'etf' || name.includes('etf');
+  if (looksLikeEtf) return 'etf';
+
+  const looksLikeFno =
+    c.includes('future') ||
+    c.includes('option') ||
+    c === 'fno' ||
+    seg.includes('f&o') ||
+    seg.includes('derivative') ||
+    /FUT$/.test(s) ||
+    /(CE|PE)$/.test(s);
+
+  if (looksLikeFno) return 'fno';
+
+  return 'equity';
+};
+
+const matchesSelectedCategory = (sym, selectedCategory) => {
+  if (selectedCategory === 'all') return true;
+  return inferIndianCategory(sym) === selectedCategory;
+};
+
+const getPeriodStart = (periodId) => {
+  const now = new Date();
+  const d = new Date(now);
+
+  switch (periodId) {
+    case 'today':
+      d.setHours(0, 0, 0, 0);
+      return d;
+    case 'week':
+      d.setDate(d.getDate() - 7);
+      return d;
+    case 'month':
+      d.setMonth(d.getMonth() - 1);
+      return d;
+    case '3months':
+      d.setMonth(d.getMonth() - 3);
+      return d;
+    case '6months':
+      d.setMonth(d.getMonth() - 6);
+      return d;
+    case 'year':
+      d.setFullYear(d.getFullYear() - 1);
+      return d;
+    default:
+      return null;
+  }
+};
+
+const formatINR = (amount) => {
+  const num = Number(amount || 0);
+  return `₹${num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+
+// ============ DASHBOARD COMPONENT ============
+const Dashboard = () => {
+  const {
+    user,
+    accounts,
+    logout,
+    savedAccounts,
+    addAccount,
+    switchToAccount,
+    removeSavedAccount,
+    getMaxSavedAccounts,
+  } = useAuthStore();
+
+  const isAdmin = (user?.role || '').toLowerCase() === 'admin';
+
+  const {
+    openTrades,
+    pendingOrders,
+    tradeHistory,
+    deals,
+    dealsSummary,
+    fetchOpenTrades,
+    fetchPendingOrders,
+    fetchTradeHistory,
+    fetchDeals,
+    placeOrder,
+    closeTrade,
+    modifyTrade,
+    addQuantity,
+    cancelOrder,
+    updateTradePnL,
+    updateTradesPnLBatch,
+  } = useTradingStore();
+
+  const { symbols, quotes, fetchSymbols, getQuote, updatePrice } = useMarketStore();
+
+  const {
+    watchlists,
+    activeWatchlistId,
+    activeSymbols,
+    setActiveWatchlistId,
+    fetchWatchlists,
+    createWatchlist,
+    fetchWatchlistSymbols,
+    addSymbol,
+    removeSymbol,
+    deleteWatchlist,
+    renameWatchlist,
+  } = useWatchlistStore();
+
+  const [allFuturesSymbols, setAllFuturesSymbols] = useState([]);
+  const [symbolsLoaded, setSymbolsLoaded] = useState(false);
+  const symbolsFetchedRef = useRef(false);
+
+  // Theme
+  const theme = useSettingsStore((s) => s.interface.theme);
+  const toggleTheme = useSettingsStore((s) => s.toggleTheme);
+
+  // ── Core state ──
+  const [selectedAccount, setSelectedAccount] = useState(null);
+  const [selectedSymbol, setSelectedSymbol] = useState('NIFTY-FUT');
+  const [symbolData, setSymbolData] = useState(null);
+
+  // Mobile tabs
+  const [activeTab, setActiveTab] = useState('trade');
+
+  // Wallet intent
+  const [walletIntent, setWalletIntent] = useState('deposit');
+
+  // Quotes
+  const [quotesViewMode, setQuotesViewMode] = useState('advanced');
+  const [selectedCategory, setSelectedCategory] = useState('all');
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // Watchlist dropdown
+  const [isWatchlistDropdownOpen, setIsWatchlistDropdownOpen] = useState(false);
+  const [editingWatchlistId, setEditingWatchlistId] = useState(null);
+  const [editingWatchlistName, setEditingWatchlistName] = useState('');
+  const watchlistDropdownRef = useRef(null);
+
+  // Chart
+  const [chartMode, setChartMode] = useState('candles');
+  const [timeframe, setTimeframe] = useState('15m');
+  const [crosshairEnabled, setCrosshairEnabled] = useState(false);
+  const [chartFullscreen, setChartFullscreen] = useState(false);
+
+  // Trade
+  const [orderType, setOrderType] = useState('market');
+  const [quantity, setQuantity] = useState(1);
+  const [stopLoss, setStopLoss] = useState('');
+  const [takeProfit, setTakeProfit] = useState('');
+  const [entryPrice, setEntryPrice] = useState('');
+  const [showOrderModal, setShowOrderModal] = useState(false);
+  const [tradeTabSection, setTradeTabSection] = useState('positions');
+  const [modifyModal, setModifyModal] = useState(null);
+  const [expandedTradeId, setExpandedTradeId] = useState(null);
+  const [closeConfirmTrade, setCloseConfirmTrade] = useState(null);
+  const [partialCloseQty, setPartialCloseQty] = useState('');
+
+  // Order symbol search
+  const [orderSymbolSearch, setOrderSymbolSearch] = useState('');
+
+  // History
+  const [historyPeriod, setHistoryPeriod] = useState('month');
+  const [historyViewMode, setHistoryViewMode] = useState('positions');
+  const [historyFilter, setHistoryFilter] = useState('all');
+  const [historySymbolFilter, setHistorySymbolFilter] = useState('');
+  const [isHistoryDropdownOpen, setIsHistoryDropdownOpen] = useState(false);
+
+  // Messages
+  const [messages, setMessages] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [messageCategory, setMessageCategory] = useState('all');
+
+  // Add Account Modal
+  const [showAddAccountModal, setShowAddAccountModal] = useState(false);
+  const [addAccountEmail, setAddAccountEmail] = useState('');
+  const [addAccountPassword, setAddAccountPassword] = useState('');
+  const [addAccountLoading, setAddAccountLoading] = useState(false);
+
+  // Socket init
+  const socketInitializedRef = useRef(false);
+  const closingMode = user?.closingMode || false;
+
+  // ── LIFTED from QuotesTab ──
+  const [quotesLocalSearch, setQuotesLocalSearch] = useState('');
+  const [showWatchlistMenu, setShowWatchlistMenu] = useState(false);
+  const [showSymbolActionMenu, setShowSymbolActionMenu] = useState(false);
+  const [selectedSymbolForAction, setSelectedSymbolForAction] = useState(null);
+
+  // ── LIFTED from ModifyPositionModal ──
+  const [modifyTab, setModifyTab] = useState('sltp');
+  const [addQty, setAddQty] = useState(1);
+  const [addQtyLoading, setAddQtyLoading] = useState(false);
+
+  // ── LIFTED from HistoryTab ──
+  const [historyLocalSymbolFilter, setHistoryLocalSymbolFilter] = useState('');
+  const [showHistorySymbolDropdown, setShowHistorySymbolDropdown] = useState(false);
+  const historyDropdownRef = useRef(null);
+
+  // ── LIFTED from CloseConfirmModal ──
+  const [closeQty, setCloseQty] = useState(1);
+  const [isPartialClose, setIsPartialClose] = useState(false);
+
+  // ── Debounced search (was inside QuotesTab) ──
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearchTerm(quotesLocalSearch);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [quotesLocalSearch]);
+
+  // ── History dropdown outside-click ──
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (historyDropdownRef.current && !historyDropdownRef.current.contains(e.target)) {
+        setShowHistorySymbolDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // ---------- Account init ----------
+  useEffect(() => {
+    if (accounts?.length) {
+      const demo = accounts.find((a) => a.is_demo);
+      setSelectedAccount(demo || accounts[0]);
+    }
+  }, [accounts]);
+
+  useEffect(() => {
+    if (!symbols?.length || !symbolsLoaded) return;
+    const exists = selectedSymbol && symbols.some((s) => s.symbol === selectedSymbol);
+    if (!exists) {
+      // Pick a good default
+      const nifty = symbols.find((s) => s.symbol === 'NIFTY-I' || s.symbol?.includes('NIFTY'));
+      setSelectedSymbol(nifty?.symbol || symbols[0].symbol);
+    }
+  }, [symbolsLoaded]);
+
+  useEffect(() => {
+    if (!selectedAccount?.id) return;
+    fetchOpenTrades(selectedAccount.id);
+    fetchPendingOrders?.(selectedAccount.id);
+    fetchTradeHistory(selectedAccount.id);
+  }, [selectedAccount, fetchOpenTrades, fetchPendingOrders, fetchTradeHistory]);
+
+  useEffect(() => {
+    if (activeTab === 'history' && historyViewMode === 'deals' && selectedAccount?.id) {
+      fetchDeals(selectedAccount.id, historyPeriod);
+    }
+  }, [activeTab, historyViewMode, historyPeriod, selectedAccount, fetchDeals]);
+
+  // Watchlists init
+  useEffect(() => {
+    const initWatchlists = async () => {
+      try {
+        const list = await fetchWatchlists();
+
+        if (!list.length) {
+          const created = await createWatchlist('Default', true);
+          setActiveWatchlistId(created.id);
+          await fetchWatchlistSymbols(created.id);
+          return;
+        }
+
+        let activeId = activeWatchlistId;
+        if (!activeId || !list.some((w) => w.id === activeId)) {
+          const def = list.find((w) => w.is_default) || list[0];
+          activeId = def.id;
+          setActiveWatchlistId(activeId);
+        }
+
+        await fetchWatchlistSymbols(activeId);
+      } catch (e) {
+        console.error(e);
+        toast.error('Failed to initialize watchlists');
+      }
+    };
+
+    initWatchlists();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedSymbol) return;
+    getQuote(selectedSymbol);
+  }, [selectedSymbol, getQuote]);
+
+  // Socket
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+
+    if (!socketInitializedRef.current) {
+      socketInitializedRef.current = true;
+      socketService.connect(token);
+    }
+
+    const pushMessage = (m) => {
+      setMessages((prev) => [m, ...prev].slice(0, 200));
+      setUnreadCount((c) => c + 1);
+    };
+
+    const onPrice = (data) => updatePrice(data);
+
+    const onConnected = (payload) => {
+      pushMessage({
+        id: `connected-${Date.now()}`,
+        type: 'system',
+        title: 'Connected',
+        message: payload?.message || 'Connected to server',
+        time: new Date().toISOString(),
+        read: false,
+      });
+    };
+
+    const onTradePnl = (payload) => {
+      if (payload?.tradeId && payload?.profit !== undefined) {
+        updateTradePnL(payload.tradeId, payload.currentPrice, payload.profit);
+      }
+    };
+
+    const onTradesPnlBatch = (payload) => {
+      if (payload?.trades && Array.isArray(payload.trades)) {
+        updateTradesPnLBatch(payload.trades);
+      }
+    };
+
+    const onAccountUpdate = (payload) => {
+      if (payload?.accountId && selectedAccount?.id === payload.accountId) {
+        setSelectedAccount((prev) => ({
+          ...prev,
+          balance: payload.balance,
+          equity: payload.equity,
+          profit: payload.profit,
+          free_margin: payload.freeMargin,
+          margin: payload.margin,
+        }));
+      }
+    };
+
+    socketService.subscribe('price:update', onPrice);
+    socketService.subscribe('connected', onConnected);
+    socketService.subscribe('trade:pnl', onTradePnl);
+    socketService.subscribe('trades:pnl:batch', onTradesPnlBatch);
+    socketService.subscribe('account:update', onAccountUpdate);
+
+    const subs = Array.from(new Set([...(activeSymbols || []), selectedSymbol].filter(Boolean)));
+    if (subs.length) socketService.subscribeSymbols(subs);
+    if (selectedAccount?.id) socketService.subscribeAccount(selectedAccount.id);
+
+    return () => {
+      socketService.unsubscribe('price:update');
+      socketService.unsubscribe('connected');
+      socketService.unsubscribe('trade:pnl');
+      socketService.unsubscribe('trades:pnl:batch');
+      socketService.unsubscribe('account:update');
+    };
+  }, [updatePrice, activeSymbols, selectedAccount, updateTradePnL, updateTradesPnLBatch]);
+
+  useEffect(() => {
+    return () => {
+      socketInitializedRef.current = false;
+      socketService.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onDocDown = (event) => {
+      if (watchlistDropdownRef.current && !watchlistDropdownRef.current.contains(event.target)) {
+        setIsWatchlistDropdownOpen(false);
+        setEditingWatchlistId(null);
+      }
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, []);
+
+  // ---------- Computed ----------
+  const currentQuote = quotes?.[selectedSymbol] || symbols?.find((s) => s.symbol === selectedSymbol) || null;
+
+  const bid = Number(currentQuote?.bid || 0);
+  const ask = Number(currentQuote?.ask || 0);
+  const totalPnL = (openTrades || []).reduce((sum, t) => sum + Number(t.profit || 0), 0);
+
+  const accountStats = useMemo(() => {
+    const balance = Number(selectedAccount?.balance || 0);
+    const margin = Number(selectedAccount?.margin || 0);
+    const equity = balance + totalPnL;
+    const freeMargin = Math.max(0, equity - margin);
+    const marginLevel = margin > 0 ? (equity / margin) * 100 : 0;
+    const leverage = selectedAccount?.leverage || 5;
+
+    return { balance, equity, margin, freeMargin, marginLevel, leverage, totalPnL };
+  }, [selectedAccount, totalPnL]);
+
+  const currentWatchlist = watchlists.find((w) => w.id === activeWatchlistId);
+
+  const filteredSymbols = useMemo(() => {
+    let list = symbols || [];
+    list = list.filter((s) => matchesSelectedCategory(s, selectedCategory));
+
+    if (searchTerm.trim()) {
+      const term = searchTerm.trim().toLowerCase();
+      return list.filter((s) => {
+        const sym = String(s.symbol || '').toLowerCase();
+        const dn = String(s.display_name || '').toLowerCase();
+        return sym.includes(term) || dn.includes(term);
+      });
+    }
+
+    const wl = new Set((activeSymbols || []).map((x) => String(x).toUpperCase()));
+    return list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
+  }, [symbols, searchTerm, selectedCategory, activeSymbols]);
+
+  const filteredHistoryTrades = useMemo(() => {
+    const start = getPeriodStart(historyPeriod);
+    let list = tradeHistory || [];
+
+    if (start) {
+      list = list.filter((t) => {
+        const ct = t.close_time || t.closeTime;
+        if (!ct) return false;
+        return new Date(ct) >= start;
+      });
+    }
+
+    if (historyFilter === 'profit') list = list.filter((t) => Number(t.profit || 0) > 0);
+    if (historyFilter === 'loss') list = list.filter((t) => Number(t.profit || 0) < 0);
+
+    return list;
+  }, [tradeHistory, historyPeriod, historyFilter]);
+
+  const filteredMessages = useMemo(() => {
+    if (messageCategory === 'all') return messages;
+    return messages.filter((m) => m.type === messageCategory);
+  }, [messages, messageCategory]);
+
+  // ---------- Actions ----------
+  const switchToDemo = () => {
+    const demo = accounts?.find((a) => a.is_demo);
+    if (demo) setSelectedAccount(demo);
+    else toast.error('No demo account found');
+  };
+
+  const switchToLive = () => {
+    const live = accounts?.find((a) => !a.is_demo);
+    if (live) setSelectedAccount(live);
+    else toast.error('No live account found');
+  };
+
+  const handleCreateWatchlist = async (e) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+    const name = window.prompt('New watchlist name?');
+    if (!name) return;
+    try {
+      const created = await createWatchlist(name.trim(), false);
+      setActiveWatchlistId(created.id);
+      await fetchWatchlistSymbols(created.id);
+      toast.success('Watchlist created');
+      setIsWatchlistDropdownOpen(false);
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to create watchlist');
+    }
+  };
+
+  const handleSwitchWatchlist = async (id, e) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+    setActiveWatchlistId(id);
+    await fetchWatchlistSymbols(id);
+    setIsWatchlistDropdownOpen(false);
+  };
+
+  const startRename = (wl, e) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+    setEditingWatchlistId(wl.id);
+    setEditingWatchlistName(wl.name);
+  };
+
+  const submitRename = async (wlId) => {
+    if (!editingWatchlistName.trim()) {
+      setEditingWatchlistId(null);
+      return;
+    }
+    const res = await renameWatchlist(wlId, editingWatchlistName.trim());
+    if (res?.success === false) toast.error(res.message || 'Rename failed');
+    else toast.success('Renamed');
+    setEditingWatchlistId(null);
+  };
+
+  const handleDeleteWatchlist = async (wlId, e) => {
+    e?.stopPropagation();
+    e?.preventDefault();
+    if (!window.confirm('Delete this watchlist?')) return;
+    const res = await deleteWatchlist(wlId);
+    if (res?.success === false) toast.error(res.message || 'Delete failed');
+    else toast.success('Deleted');
+  };
+
+  const toggleSymbolInWatchlist = async (sym) => {
+    if (!activeWatchlistId) return toast.error('No active watchlist');
+    const s = String(sym).toUpperCase();
+    const exists = (activeSymbols || []).includes(s);
+    const res = exists ? await removeSymbol(activeWatchlistId, s) : await addSymbol(activeWatchlistId, s);
+
+    if (res?.success === false) toast.error(res.message || 'Failed');
+  };
+
+  const placeOrderWithQty = async (type, qty) => {
+    if (!selectedAccount?.id || !selectedSymbol) return;
+
+    const result = await placeOrder({
+      accountId: selectedAccount.id,
+      symbol: selectedSymbol,
+      type,
+      orderType: 'market',
+      quantity: Number(qty || 1),
+      stopLoss: stopLoss ? Number(stopLoss) : 0,
+      takeProfit: takeProfit ? Number(takeProfit) : 0,
+      price: entryPrice ? Number(entryPrice) : 0,
+    });
+
+    if (result.success) {
+      toast.success(`${type.toUpperCase()} ${qty} ${selectedSymbol}`);
+      fetchOpenTrades(selectedAccount.id);
+      fetchPendingOrders?.(selectedAccount.id);
+      setShowOrderModal(false);
+    } else {
+      toast.error(result.message || 'Order failed');
+    }
+  };
+
+  const handleCloseTrade = async (tradeId) => {
+    const result = await closeTrade(tradeId, selectedAccount?.id);
+    if (result.success) {
+      toast.success('Position closed');
+      setExpandedTradeId(null);
+      setCloseConfirmTrade(null);
+    } else {
+      toast.error(result.message || 'Close failed');
+    }
+  };
+
+  const handleModifyTrade = async (tradeId, newSL, newTP) => {
+    const result = await modifyTrade?.(tradeId, { stopLoss: newSL, takeProfit: newTP });
+    if (result?.success) {
+      toast.success('Modified');
+      setModifyModal(null);
+      fetchOpenTrades(selectedAccount.id);
+    } else {
+      toast.error(result?.message || 'Modify failed');
+    }
+  };
+
+  const markAllRead = () => {
+    setMessages((prev) => prev.map((m) => ({ ...m, read: true })));
+    setUnreadCount(0);
+  };
+
+  const handleAddAccount = async () => {
+    if (!addAccountEmail || !addAccountPassword) {
+      return toast.error('Email and password required');
+    }
+
+    setAddAccountLoading(true);
+    const result = await addAccount(addAccountEmail, addAccountPassword);
+    setAddAccountLoading(false);
+
+    if (result.success) {
+      toast.success('Account added successfully');
+      setShowAddAccountModal(false);
+      setAddAccountEmail('');
+      setAddAccountPassword('');
+    } else {
+      toast.error(result.message);
+    }
+  };
+
+  const handleSwitchToSavedAccount = async (savedAcc) => {
+    const loadingToast = toast.loading('Switching account...');
+    const result = await switchToAccount(savedAcc);
+    toast.dismiss(loadingToast);
+
+    if (result.success) {
+      toast.success(`Switched to ${savedAcc.email}`);
+    } else {
+      if (result.requiresLogin) {
+        toast.error('Session expired. Please login again.');
+        removeSavedAccount(savedAcc.email);
+      } else {
+        toast.error(result.message);
+      }
+    }
+  };
+
+  const handleRemoveSavedAccount = (identifier) => {
+    if (user?.loginId === identifier || user?.email === identifier) {
+      return toast.error('Cannot remove currently active account');
+    }
+
+    if (!window.confirm('Remove this account from saved accounts?')) return;
+
+    const result = removeSavedAccount(identifier);
+    if (result.success) {
+      toast.success('Account removed');
+    } else {
+      toast.error(result.message);
+    }
+  };
+
+  // ============ CLOSE CONFIRM MODAL ============
+  const CloseConfirmModal = () => {
+      if (!closeConfirmTrade) return null;
+
+      const trade = closeConfirmTrade;
+      const pnl = Number(trade.profit || 0);
+      const isProfit = pnl >= 0;
+      const maxQty = Number(trade.quantity);
+
+      // ✅ Uses Dashboard-level closeQty and isPartialClose
+      const partialPnL = isPartialClose ? (pnl / maxQty) * closeQty : pnl;
+
+      const handleClose = async () => {
+        if (isPartialClose && closeQty >= maxQty) {
+          await handleCloseTrade(trade.id);
+        } else if (isPartialClose && closeQty > 0 && closeQty < maxQty) {
+          const result = await closeTrade(trade.id, selectedAccount?.id, closeQty);
+          if (result.success) {
+            toast.success(`Closed ${closeQty} of ${maxQty} positions`);
+            setCloseConfirmTrade(null);
+          } else {
+            toast.error(result.message || 'Partial close failed');
+          }
+        } else {
+          await handleCloseTrade(trade.id);
+        }
+      };
+
+      return (
+        <div
+          className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4"
+          onClick={() => setCloseConfirmTrade(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl"
+            style={{ background: '#1e222d', border: '1px solid #363a45' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+              <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Close Position</h3>
+              <button onClick={() => setCloseConfirmTrade(null)}>
+                <X size={22} color="#787b86" />
+              </button>
+            </div>
+
+            <div className="p-4">
+              <div className="p-4 rounded-lg mb-4" style={{ background: '#2a2e39' }}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold text-lg" style={{ color: '#d1d4dc' }}>{trade.symbol}</span>
+                  <span
+                    className="px-2 py-1 rounded text-xs font-semibold"
+                    style={{
+                      background: trade.trade_type === 'buy' ? '#26a69a20' : '#ef535020',
+                      color: trade.trade_type === 'buy' ? '#26a69a' : '#ef5350',
+                    }}
+                  >
+                    {String(trade.trade_type || '').toUpperCase()}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <div style={{ color: '#787b86' }}>Total Quantity</div>
+                    <div className="font-bold" style={{ color: '#d1d4dc' }}>{maxQty}</div>
+                  </div>
+                  <div>
+                    <div style={{ color: '#787b86' }}>Open Price</div>
+                    <div style={{ color: '#d1d4dc' }}>{formatINR(trade.open_price)}</div>
+                  </div>
+                  <div>
+                    <div style={{ color: '#787b86' }}>Current Price</div>
+                    <div style={{ color: '#d1d4dc' }}>{formatINR(trade.current_price || trade.open_price)}</div>
+                  </div>
+                  <div>
+                    <div style={{ color: '#787b86' }}>Total P&L</div>
+                    <div className="font-bold" style={{ color: isProfit ? '#26a69a' : '#ef5350' }}>
+                      {isProfit ? '+' : ''}{formatINR(pnl)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mb-4">
+                <label className="flex items-center gap-2 cursor-pointer p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+                  <input
+                    type="checkbox"
+                    checked={isPartialClose}
+                    onChange={(e) => {
+                      setIsPartialClose(e.target.checked);
+                      if (!e.target.checked) setCloseQty(maxQty);
+                    }}
+                    className="w-4 h-4 rounded"
+                    style={{ accentColor: '#2962ff' }}
+                  />
+                  <span className="text-sm font-medium" style={{ color: '#d1d4dc' }}>
+                    Partial Close (Close specific quantity)
+                  </span>
+                </label>
+              </div>
+
+              {isPartialClose && (
+                <div className="mb-4">
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Quantity to Close</label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setCloseQty(Math.max(1, closeQty - 1))}
+                      disabled={closeQty <= 1}
+                      className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold disabled:opacity-30"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    >
+                      −
+                    </button>
+                    <input
+                      type="number"
+                      value={closeQty}
+                      onChange={(e) => {
+                        const val = Math.max(1, Math.min(maxQty, Number(e.target.value || 1)));
+                        setCloseQty(val);
+                      }}
+                      className="flex-1 px-4 py-3 rounded-lg text-xl font-bold text-center"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                      min="1"
+                      max={maxQty}
+                    />
+                    <button
+                      onClick={() => setCloseQty(Math.min(maxQty, closeQty + 1))}
+                      disabled={closeQty >= maxQty}
+                      className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold disabled:opacity-30"
+                      style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    >
+                      +
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2 mt-2">
+                    <button
+                      onClick={() => setCloseQty(Math.max(1, Math.floor(maxQty / 4)))}
+                      className="flex-1 py-2 rounded-lg text-xs font-medium"
+                      style={{ background: '#2a2e39', color: '#787b86', border: '1px solid #363a45' }}
+                    >
+                      25% ({Math.max(1, Math.floor(maxQty / 4))})
+                    </button>
+                    <button
+                      onClick={() => setCloseQty(Math.max(1, Math.floor(maxQty / 2)))}
+                      className="flex-1 py-2 rounded-lg text-xs font-medium"
+                      style={{ background: '#2a2e39', color: '#787b86', border: '1px solid #363a45' }}
+                    >
+                      Half ({Math.max(1, Math.floor(maxQty / 2))})
+                    </button>
+                    <button
+                      onClick={() => setCloseQty(maxQty)}
+                      className="flex-1 py-2 rounded-lg text-xs font-medium"
+                      style={{ background: '#2a2e39', color: '#787b86', border: '1px solid #363a45' }}
+                    >
+                      All ({maxQty})
+                    </button>
+                  </div>
+
+                  <div className="mt-3 p-3 rounded-lg" style={{ background: '#252832', border: '1px solid #363a45' }}>
+                    <div className="flex justify-between text-sm">
+                      <span style={{ color: '#787b86' }}>Closing</span>
+                      <span style={{ color: '#d1d4dc' }}>{closeQty} of {maxQty}</span>
+                    </div>
+                    <div className="flex justify-between text-sm mt-1">
+                      <span style={{ color: '#787b86' }}>Remaining</span>
+                      <span style={{ color: '#d1d4dc' }}>{maxQty - closeQty}</span>
+                    </div>
+                    <div className="flex justify-between text-sm mt-2 pt-2 border-t" style={{ borderColor: '#363a45' }}>
+                      <span style={{ color: '#787b86' }}>Est. P&L from Close</span>
+                      <span className="font-bold" style={{ color: partialPnL >= 0 ? '#26a69a' : '#ef5350' }}>
+                        {partialPnL >= 0 ? '+' : ''}{formatINR(partialPnL)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <p className="text-sm mb-4" style={{ color: '#787b86' }}>
+                {isPartialClose && closeQty < maxQty
+                  ? `This will close ${closeQty} of ${maxQty} positions. ${maxQty - closeQty} will remain open.`
+                  : 'This will close the entire position. This action cannot be undone.'}
+              </p>
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => setCloseConfirmTrade(null)}
+                  className="py-3 rounded-lg font-medium"
+                  style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleClose}
+                  className="py-3 rounded-lg font-semibold text-white"
+                  style={{ background: '#ef5350' }}
+                >
+                  Close {isPartialClose && closeQty < maxQty ? `${closeQty} Positions` : 'Position'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+  // ============ MOBILE NAV ============
+  const MobileNav = () => {
+    const tabs = [
+      { id: 'quotes', icon: List, label: 'Quotes' },
+      { id: 'chart', icon: BarChart2, label: 'Chart' },
+      { id: 'trade', icon: TrendingUp, label: 'Trade' },
+      { id: 'history', icon: Clock, label: 'History' },
+      { id: 'messages', icon: MessageSquare, label: 'Messages', badge: unreadCount },
+      { id: 'wallet', icon: WalletIcon, label: 'Wallet' },
+      { id: 'settings', icon: Settings, label: 'Settings' },
+    ];
+
+    if (isAdmin) {
+      tabs.splice(6, 0, { id: 'admin', icon: User, label: 'Admin' });
+    }
+
+    return (
+      <div
+        className="fixed bottom-0 left-0 right-0 h-16 flex items-center justify-around border-t z-50 lg:hidden"
+        style={{ background: '#1e222d', borderColor: '#363a45' }}
+      >
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className="flex flex-col items-center justify-center flex-1 h-full relative"
+            style={{ color: activeTab === tab.id ? '#2962ff' : '#787b86' }}
+          >
+            <tab.icon size={22} />
+            <span className="text-[11px] mt-1 font-medium">{tab.label}</span>
+            {tab.badge > 0 && (
+              <span className="absolute top-2 right-1/4 w-5 h-5 bg-red-500 text-white text-[10px] rounded-full flex items-center justify-center font-bold">
+                {tab.badge > 9 ? '9+' : tab.badge}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+    );
+  };
+
+  // ============ QUOTES TAB ============
+  // ============ QUOTES TAB ============
+  const QuotesTab = () => {
+    const searchInputRef = useRef(null);
+    const [allSymbols, setAllSymbols] = useState([]);
+    const [loadingSymbols, setLoadingSymbols] = useState(false);
+
+    // Fetch ALL futures symbols from backend
+    const fetchAllSymbols = useCallback(async () => {
+      setLoadingSymbols(true);
+      try {
+        const res = await api.get('/market/symbols', {
+          params: { limit: 5000 },
+        });
+        if (res.data.success && res.data.symbols) {
+          setAllSymbols(res.data.symbols);
+          console.log(`📊 Loaded ${res.data.symbols.length} symbols`);
+        }
+      } catch (error) {
+        console.error('Failed to fetch symbols:', error);
+      } finally {
+        setLoadingSymbols(false);
+      }
+    }, []);
+
+    // Load symbols on mount
+    useEffect(() => {
+      fetchAllSymbols();
+    }, [fetchAllSymbols]);
+
+    // Filter and display symbols
+    const displayedSymbols = useMemo(() => {
+      const sourceList = allSymbols.length > 0 ? allSymbols : symbols || [];
+
+      // Apply category filter
+      let list = sourceList;
+      if (selectedCategory !== 'all') {
+        list = list.filter((s) => {
+          const cat = String(s.category || '').toLowerCase();
+          const sym = String(s.symbol || '').toUpperCase();
+          const seg = String(s.segment || '').toUpperCase();
+          const underlying = String(s.underlying || '').toUpperCase();
+
+          if (selectedCategory === 'index_futures') {
+            return (
+              cat === 'index_futures' ||
+              /NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX/i.test(underlying)
+            );
+          }
+          if (selectedCategory === 'stock_futures') {
+            return (
+              cat === 'stock_futures' ||
+              (seg === 'NFO' &&
+                !cat.includes('index') &&
+                !cat.includes('commodity') &&
+                !/NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|SENSEX|BANKEX/i.test(underlying))
+            );
+          }
+          if (selectedCategory === 'commodity_futures') {
+            return (
+              cat === 'commodity_futures' ||
+              seg === 'MCX' ||
+              String(s.exchange || '').toUpperCase() === 'MCX'
+            );
+          }
+          return true;
+        });
+      }
+
+      // If user is searching, search ALL symbols
+      if (quotesLocalSearch.trim()) {
+        const term = quotesLocalSearch.trim().toLowerCase();
+        const results = list.filter((s) => {
+          const sym = String(s.symbol || '').toLowerCase();
+          const name = String(s.display_name || '').toLowerCase();
+          const underlying = String(s.underlying || '').toLowerCase();
+          return (
+            sym.includes(term) ||
+            name.includes(term) ||
+            underlying.includes(term)
+          );
+        });
+
+        // Sort: exact underlying match first, then by expiry
+        results.sort((a, b) => {
+          const aUnderlying = String(a.underlying || '').toLowerCase();
+          const bUnderlying = String(b.underlying || '').toLowerCase();
+          const aExact = aUnderlying === term;
+          const bExact = bUnderlying === term;
+
+          if (aExact && !bExact) return -1;
+          if (!aExact && bExact) return 1;
+
+          // Sort by underlying alphabetically
+          if (aUnderlying !== bUnderlying) {
+            return aUnderlying.localeCompare(bUnderlying);
+          }
+
+          // Within same underlying, aliases first, then by expiry
+          const aSeries = a.series || '';
+          const bSeries = b.series || '';
+          if (aSeries && !bSeries) return -1;
+          if (!aSeries && bSeries) return 1;
+
+          // By expiry date
+          const aExpiry = a.expiry_date || '9999';
+          const bExpiry = b.expiry_date || '9999';
+          return aExpiry.localeCompare(bExpiry);
+        });
+
+        return results.slice(0, 200);
+      }
+
+      // If NOT searching, show watchlist symbols only
+      const wl = new Set(
+        (activeSymbols || []).map((x) => String(x).toUpperCase())
+      );
+
+      if (wl.size === 0) {
+        // Show popular default symbols if watchlist is empty
+        const defaults = list
+          .filter((s) => s.series === 'I')
+          .slice(0, 20);
+        return defaults;
+      }
+
+      return list.filter((s) => wl.has(String(s.symbol).toUpperCase()));
+    }, [allSymbols, symbols, quotesLocalSearch, selectedCategory, activeSymbols]);
+
+    // Show popup on symbol tap (NOT direct redirect)
+    const handleSymbolTap = (sym, e) => {
+      e.stopPropagation();
+      setSelectedSymbolForAction(sym);
+      setShowSymbolActionMenu(true);
+    };
+
+    // ---- Symbol Action Menu ----
+    const SymbolActionMenu = () => {
+      if (!showSymbolActionMenu || !selectedSymbolForAction) return null;
+      const sym = selectedSymbolForAction;
+      const inWL = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
+      const quote = quotes?.[sym.symbol] || sym;
+      const symBid = Number(quote.bid || quote.last_price || 0);
+      const symAsk = Number(quote.ask || quote.last_price || 0);
+      const change = Number(quote.change_percent || sym.change_percent || 0);
+      const expiry = sym.expiry_date
+        ? new Date(sym.expiry_date).toLocaleDateString('en-IN', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric',
+          })
+        : '';
+
+      return (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-end justify-center"
+          onClick={() => {
+            setShowSymbolActionMenu(false);
+            setSelectedSymbolForAction(null);
+          }}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-xl max-h-[85vh] overflow-y-auto"
+            style={{ background: '#1e222d', border: '1px solid #363a45' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Symbol Info Header */}
+            <div className="p-4 border-b" style={{ borderColor: '#363a45' }}>
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+                    {sym.symbol}
+                  </div>
+                  <div className="text-sm" style={{ color: '#787b86' }}>
+                    {sym.display_name}
+                  </div>
+                  {expiry && (
+                    <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                      Expiry: {expiry} • {sym.exchange} • Lot: {sym.lot_size || 1}
+                    </div>
+                  )}
+                </div>
+                <div className="text-right">
+                  <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>
+                    {(symBid || symAsk).toFixed(2)}
+                  </div>
+                  <div
+                    className="text-sm font-medium"
+                    style={{ color: change >= 0 ? '#26a69a' : '#ef5350' }}
+                  >
+                    {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+                  </div>
+                </div>
+              </div>
+
+              {/* Bid/Ask */}
+              <div className="flex gap-4 mt-2">
+                <div className="flex-1 p-2 rounded text-center" style={{ background: '#ef535015' }}>
+                  <div className="text-xs" style={{ color: '#787b86' }}>Bid</div>
+                  <div className="font-bold" style={{ color: '#ef5350' }}>
+                    {symBid.toFixed(2)}
+                  </div>
+                </div>
+                <div className="flex-1 p-2 rounded text-center" style={{ background: '#26a69a15' }}>
+                  <div className="text-xs" style={{ color: '#787b86' }}>Ask</div>
+                  <div className="font-bold" style={{ color: '#26a69a' }}>
+                    {symAsk.toFixed(2)}
+                  </div>
+                </div>
+                <div className="flex-1 p-2 rounded text-center" style={{ background: '#2a2e39' }}>
+                  <div className="text-xs" style={{ color: '#787b86' }}>Spread</div>
+                  <div className="font-bold" style={{ color: '#d1d4dc' }}>
+                    {Math.abs(symAsk - symBid).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Trade Section */}
+            <div className="p-4 border-b" style={{ borderColor: '#363a45' }}>
+              <div className="text-xs font-medium mb-3" style={{ color: '#787b86' }}>
+                QUICK TRADE
+              </div>
+
+              {/* Quantity */}
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-sm" style={{ color: '#787b86' }}>Quantity</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setQuantity(Math.max(1, quantity - 1))}
+                    className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold"
+                    style={{ background: '#2a2e39', color: '#d1d4dc' }}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    value={quantity}
+                    onChange={(e) => setQuantity(Math.max(1, Number(e.target.value || 1)))}
+                    className="w-20 px-2 py-1.5 rounded text-center text-base font-bold"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    min="1"
+                  />
+                  <button
+                    onClick={() => setQuantity(quantity + 1)}
+                    className="w-8 h-8 rounded flex items-center justify-center text-lg font-bold"
+                    style={{ background: '#2a2e39', color: '#d1d4dc' }}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick qty buttons */}
+              <div className="flex gap-1.5 mb-4">
+                {[1, 5, 10, 25, 50, 100].map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => setQuantity(q)}
+                    className="flex-1 py-1.5 rounded text-xs font-medium"
+                    style={{
+                      background: quantity === q ? '#2962ff' : '#2a2e39',
+                      color: quantity === q ? '#fff' : '#787b86',
+                    }}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+
+              {/* Buy/Sell buttons */}
+              {closingMode ? (
+                <div className="p-3 rounded-lg flex items-center gap-2" style={{ background: '#ff980020' }}>
+                  <Lock size={16} color="#ff9800" />
+                  <span className="text-sm" style={{ color: '#ff9800' }}>
+                    Closing mode active — new orders disabled
+                  </span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={async () => {
+                      setSelectedSymbol(sym.symbol);
+                      setTimeout(async () => {
+                        await placeOrderWithQty('sell', quantity);
+                        setShowSymbolActionMenu(false);
+                      }, 100);
+                    }}
+                    className="py-3.5 rounded-lg font-bold text-white text-lg"
+                    style={{ background: '#ef5350' }}
+                  >
+                    SELL {symBid.toFixed(2)}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setSelectedSymbol(sym.symbol);
+                      setTimeout(async () => {
+                        await placeOrderWithQty('buy', quantity);
+                        setShowSymbolActionMenu(false);
+                      }, 100);
+                    }}
+                    className="py-3.5 rounded-lg font-bold text-white text-lg"
+                    style={{ background: '#26a69a' }}
+                  >
+                    BUY {symAsk.toFixed(2)}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* More Actions */}
+            <div className="p-2">
+              <button
+                onClick={() => {
+                  setSelectedSymbol(sym.symbol);
+                  setActiveTab('chart');
+                  setShowSymbolActionMenu(false);
+                }}
+                className="w-full p-3 text-left rounded-lg hover:bg-white/5 flex items-center gap-3"
+              >
+                <BarChart2 size={20} color="#2962ff" />
+                <div>
+                  <div style={{ color: '#d1d4dc' }}>View Chart</div>
+                  <div className="text-xs" style={{ color: '#787b86' }}>Open full chart view</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  setSelectedSymbol(sym.symbol);
+                  setShowOrderModal(true);
+                  setShowSymbolActionMenu(false);
+                }}
+                className="w-full p-3 text-left rounded-lg hover:bg-white/5 flex items-center gap-3"
+              >
+                <Edit3 size={20} color="#f5c542" />
+                <div>
+                  <div style={{ color: '#d1d4dc' }}>Advanced Order</div>
+                  <div className="text-xs" style={{ color: '#787b86' }}>Set Stop Loss & Take Profit</div>
+                </div>
+              </button>
+
+              <button
+                onClick={() => {
+                  toggleSymbolInWatchlist(sym.symbol);
+                  setShowSymbolActionMenu(false);
+                }}
+                className="w-full p-3 text-left rounded-lg hover:bg-white/5 flex items-center gap-3"
+              >
+                <Star
+                  size={20}
+                  color={inWL ? '#f5c542' : '#787b86'}
+                  fill={inWL ? '#f5c542' : 'none'}
+                />
+                <div>
+                  <div style={{ color: '#d1d4dc' }}>
+                    {inWL ? 'Remove from Watchlist' : 'Add to Watchlist'}
+                  </div>
+                  <div className="text-xs" style={{ color: '#787b86' }}>
+                    {inWL ? 'Remove from current watchlist' : 'Add to current watchlist'}
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            {/* Cancel */}
+            <div className="p-3 border-t" style={{ borderColor: '#363a45' }}>
+              <button
+                onClick={() => {
+                  setShowSymbolActionMenu(false);
+                  setSelectedSymbolForAction(null);
+                }}
+                className="w-full py-3 rounded-lg font-medium"
+                style={{ background: '#2a2e39', color: '#787b86' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ---- Watchlist Menu ----
+    const WatchlistMenu = () => {
+      if (!showWatchlistMenu) return null;
+
+      return (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-end justify-center"
+          onClick={() => setShowWatchlistMenu(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-xl"
+            style={{ background: '#1e222d', border: '1px solid #363a45' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+              <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Watchlists</h3>
+              <button onClick={() => setShowWatchlistMenu(false)}>
+                <X size={24} color="#787b86" />
+              </button>
+            </div>
+            <div className="max-h-80 overflow-y-auto">
+              {watchlists.map((wl) => (
+                <button
+                  key={wl.id}
+                  onClick={async () => {
+                    setShowWatchlistMenu(false);
+                    await handleSwitchWatchlist(wl.id);
+                  }}
+                  className="w-full p-4 text-left flex items-center justify-between border-b"
+                  style={{
+                    borderColor: '#363a45',
+                    background: wl.id === activeWatchlistId ? '#2962ff20' : 'transparent',
+                  }}
+                >
+                  <div className="flex items-center gap-3">
+                    <Star size={18} color={wl.id === activeWatchlistId ? '#2962ff' : '#787b86'} />
+                    <span style={{ color: '#d1d4dc' }}>{wl.name}</span>
+                    {wl.is_default && (
+                      <span className="text-xs px-2 py-0.5 rounded" style={{ background: '#26a69a20', color: '#26a69a' }}>
+                        Default
+                      </span>
+                    )}
+                  </div>
+                  {wl.id === activeWatchlistId && (
+                    <div className="w-2 h-2 rounded-full" style={{ background: '#2962ff' }} />
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="p-4 border-t" style={{ borderColor: '#363a45' }}>
+              <button
+                onClick={(e) => {
+                  setShowWatchlistMenu(false);
+                  handleCreateWatchlist(e);
+                }}
+                className="w-full py-3 rounded-lg font-medium flex items-center justify-center gap-2"
+                style={{ background: '#2962ff', color: '#fff' }}
+              >
+                <FolderPlus size={20} />
+                Create New Watchlist
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ---- MAIN RETURN ----
+    return (
+      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+        <div className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+          {/* Watchlist Selector */}
+          <div className="flex items-center justify-between mb-3">
+            <button
+              onClick={() => setShowWatchlistMenu(true)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg"
+              style={{ background: '#2a2e39', border: '1px solid #363a45' }}
+            >
+              <Star size={16} color="#f5c542" />
+              <span className="font-medium" style={{ color: '#d1d4dc' }}>
+                {currentWatchlist?.name || 'Select Watchlist'}
+              </span>
+              <ChevronDown size={16} color="#787b86" />
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={fetchAllSymbols}
+                className="p-2 rounded-lg"
+                style={{ background: '#2a2e39' }}
+                title="Refresh Symbols"
+              >
+                <RefreshCw
+                  size={18}
+                  color="#787b86"
+                  className={loadingSymbols ? 'animate-spin' : ''}
+                />
+              </button>
+              <button
+                onClick={(e) => handleCreateWatchlist(e)}
+                className="p-2 rounded-lg"
+                style={{ background: '#2962ff' }}
+              >
+                <Plus size={20} color="#fff" />
+              </button>
+            </div>
+          </div>
+
+          {/* Category Filter */}
+          <div className="flex gap-1 overflow-x-auto pb-2">
+            {SYMBOL_CATEGORIES.map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => setSelectedCategory(cat.id)}
+                className="px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
+                style={{
+                  background: selectedCategory === cat.id ? '#2962ff' : '#2a2e39',
+                  color: selectedCategory === cat.id ? '#fff' : '#787b86',
+                }}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Search */}
+          <div className="relative mt-2">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: '#787b86' }} />
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={quotesLocalSearch}
+              onChange={(e) => setQuotesLocalSearch(e.target.value)}
+              placeholder="Search all futures (RELIANCE, NIFTY, GOLD...)"
+              className="w-full pl-10 pr-10 py-2.5 rounded border text-base"
+              style={{ background: '#2a2e39', borderColor: '#363a45', color: '#d1d4dc' }}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck="false"
+            />
+            {quotesLocalSearch && (
+              <button
+                onClick={() => {
+                  setQuotesLocalSearch('');
+                  searchInputRef.current?.focus();
+                }}
+                className="absolute right-3 top-1/2 -translate-y-1/2"
+              >
+                <X size={16} color="#787b86" />
+              </button>
+            )}
+          </div>
+
+          {/* Search result info */}
+          {quotesLocalSearch && (
+            <div className="flex items-center justify-between mt-2">
+              <span className="text-xs" style={{ color: '#787b86' }}>
+                {displayedSymbols.length} results for "{quotesLocalSearch}"
+              </span>
+              <span className="text-xs" style={{ color: '#2962ff' }}>
+                Tap to trade
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Column Headers */}
+        <div
+          className={`grid px-3 py-2.5 text-xs font-semibold border-b ${
+            quotesViewMode === 'advanced' ? 'grid-cols-5' : 'grid-cols-3'
+          }`}
+          style={{ background: '#252832', borderColor: '#363a45', color: '#787b86' }}
+        >
+          <div>Symbol</div>
+          <div className="text-right">Bid</div>
+          <div className="text-right">Ask</div>
+          {quotesViewMode === 'advanced' && (
+            <>
+              <div className="text-right">Expiry</div>
+              <div className="text-right">Chg%</div>
+            </>
+          )}
+        </div>
+
+        {/* Symbol List */}
+        <div className="flex-1 overflow-y-auto">
+          {loadingSymbols ? (
+            <div className="p-8 text-center" style={{ color: '#787b86' }}>
+              <RefreshCw size={32} className="animate-spin mx-auto mb-3" />
+              <div>Loading symbols...</div>
+            </div>
+          ) : displayedSymbols.length === 0 ? (
+            <div className="p-8 text-center" style={{ color: '#787b86' }}>
+              {quotesLocalSearch ? (
+                <>
+                  <Search size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base mb-1">No symbols found for "{quotesLocalSearch}"</div>
+                  <div className="text-sm">
+                    Try searching by underlying name (e.g., RELIANCE, TCS, GOLD)
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Star size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base mb-1">Watchlist is empty</div>
+                  <div className="text-sm">
+                    Use the search bar above to find and add symbols
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            displayedSymbols.map((sym) => {
+              const isSelected = selectedSymbol === sym.symbol;
+              const inWL = (activeSymbols || []).includes(String(sym.symbol).toUpperCase());
+              const quote = quotes?.[sym.symbol] || sym;
+              const change = Number(quote.change_percent || sym.change_percent || 0);
+              const symBid = Number(quote.bid || sym.bid || sym.last_price || 0);
+              const symAsk = Number(quote.ask || sym.ask || sym.last_price || 0);
+
+              // Format expiry
+              const expiry = sym.expiry_date
+                ? new Date(sym.expiry_date).toLocaleDateString('en-IN', {
+                    day: '2-digit',
+                    month: 'short',
+                  })
+                : '';
+
+              return (
+                <div
+                  key={sym.symbol}
+                  onClick={(e) => handleSymbolTap(sym, e)}
+                  className={`grid items-center px-3 py-3 border-b cursor-pointer hover:bg-white/5 ${
+                    quotesViewMode === 'advanced' ? 'grid-cols-5' : 'grid-cols-3'
+                  }`}
+                  style={{
+                    background: isSelected ? '#2a2e39' : 'transparent',
+                    borderColor: '#363a45',
+                    borderLeft: isSelected ? '3px solid #2962ff' : '3px solid transparent',
+                  }}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Star
+                      size={14}
+                      color={inWL ? '#f5c542' : '#787b86'}
+                      fill={inWL ? '#f5c542' : 'none'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSymbolInWatchlist(sym.symbol);
+                      }}
+                      className="shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm truncate" style={{ color: '#d1d4dc' }}>
+                        {sym.series
+                          ? `${sym.underlying}-${sym.series}`
+                          : sym.symbol}
+                      </div>
+                      <div className="text-xs truncate" style={{ color: '#787b86' }}>
+                        {sym.display_name || sym.symbol}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-right text-sm font-mono" style={{ color: '#ef5350' }}>
+                    {symBid > 0 ? symBid.toFixed(2) : '—'}
+                  </div>
+                  <div className="text-right text-sm font-mono" style={{ color: '#26a69a' }}>
+                    {symAsk > 0 ? symAsk.toFixed(2) : '—'}
+                  </div>
+
+                  {quotesViewMode === 'advanced' && (
+                    <>
+                      <div className="text-right text-xs" style={{ color: '#787b86' }}>
+                        {expiry || '—'}
+                      </div>
+                      <div className="text-right">
+                        <span
+                          className="text-xs font-semibold"
+                          style={{ color: change >= 0 ? '#26a69a' : '#ef5350' }}
+                        >
+                          {change !== 0
+                            ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`
+                            : '—'}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <SymbolActionMenu />
+        <WatchlistMenu />
+      </div>
+    );
+  };
+
+  // ============ CHART TAB ============
+  const ChartTab = () => {
+    const chartHeight = chartFullscreen ? window.innerHeight - 140 : 420;
+
+    return (
+      <div className={`flex flex-col h-full ${chartFullscreen ? 'fixed inset-0 z-50' : ''}`} style={{ background: '#131722' }}>
+        <div className="flex items-center justify-between p-3 border-b" style={{ borderColor: '#363a45', background: '#1e222d' }}>
+          <div className="flex items-center gap-3">
+            <span className="font-bold text-lg" style={{ color: '#d1d4dc' }}>{selectedSymbol}</span>
+            <span className="text-base" style={{ color: '#787b86' }}>
+              {bid ? `Bid ${bid.toFixed(2)}` : ''}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setCrosshairEnabled((v) => !v)}
+              className="p-2 rounded"
+              style={{ background: crosshairEnabled ? '#2962ff' : 'transparent' }}
+              title="Crosshair"
+            >
+              <Crosshair size={18} color={crosshairEnabled ? '#fff' : '#787b86'} />
+            </button>
+            <button onClick={() => setChartFullscreen((v) => !v)} className="p-2 rounded" title="Fullscreen">
+              {chartFullscreen ? <Minimize2 size={18} color="#787b86" /> : <Maximize2 size={18} color="#787b86" />}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1 p-2 overflow-x-auto border-b" style={{ borderColor: '#363a45', background: '#1e222d' }}>
+          {TIMEFRAMES.map((tf) => (
+            <button
+              key={tf.id}
+              onClick={() => setTimeframe(tf.value)}
+              className="px-3 py-1.5 rounded text-sm font-medium"
+              style={{
+                background: timeframe === tf.value ? '#2962ff' : 'transparent',
+                color: timeframe === tf.value ? '#fff' : '#787b86',
+              }}
+            >
+              {tf.label}
+            </button>
+          ))}
+
+          <div className="h-4 w-px mx-2" style={{ background: '#363a45' }} />
+
+          {CHART_TYPES.map((ct) => (
+            <button
+              key={ct.id}
+              onClick={() => setChartMode(ct.id)}
+              className="px-3 py-1.5 rounded text-sm font-medium"
+              style={{
+                background: chartMode === ct.id ? '#2962ff' : 'transparent',
+                color: chartMode === ct.id ? '#fff' : '#787b86',
+              }}
+            >
+              {ct.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 relative">
+          <PriceChart
+            symbol={selectedSymbol}
+            timeframe={timeframe}
+            mode={chartMode}
+            height={chartHeight}
+            crosshairEnabled={crosshairEnabled}
+          />
+
+          <div
+            className="absolute left-4 right-4 rounded-lg p-4"
+            style={{ bottom: chartFullscreen ? 12 : 70, background: 'rgba(30, 34, 45, 0.95)', border: '1px solid #363a45' }}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm font-medium" style={{ color: '#787b86' }}>Quantity</span>
+              <input
+                type="number"
+                value={quantity}
+                onChange={(e) => setQuantity(Math.max(1, Number(e.target.value || 1)))}
+                className="w-24 px-3 py-1.5 rounded text-base text-center font-medium"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                min="1"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => placeOrderWithQty('sell', quantity)}
+                className="py-3.5 rounded-lg font-bold text-white text-lg"
+                style={{ background: '#ef5350' }}
+              >
+                SELL {bid.toFixed(2)}
+              </button>
+              <button
+                onClick={() => placeOrderWithQty('buy', quantity)}
+                className="py-3.5 rounded-lg font-bold text-white text-lg"
+                style={{ background: '#26a69a' }}
+              >
+                BUY {ask.toFixed(2)}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============ ORDER MODAL ============
+  const OrderModal = () => (
+    <div
+      className="fixed inset-0 z-[9999] bg-black/60 flex items-end lg:items-center justify-center"
+      onClick={() => setShowOrderModal(false)}
+    >
+      <div
+        className="w-full lg:max-w-md lg:rounded-xl rounded-t-xl max-h-[92vh] flex flex-col overflow-hidden"
+        style={{ background: '#1e222d', border: '1px solid #363a45' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b shrink-0" style={{ borderColor: '#363a45' }}>
+          <h3 className="font-bold text-xl" style={{ color: '#d1d4dc' }}>New Order</h3>
+          <button onClick={() => setShowOrderModal(false)}>
+            <X size={24} color="#787b86" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 pb-28">
+          <div className="mb-4">
+            <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
+              Symbol (Search &amp; Select)
+            </label>
+
+            <input
+              value={orderSymbolSearch}
+              onChange={(e) => setOrderSymbolSearch(e.target.value)}
+              placeholder="Search e.g. NIFTY, RELIANCE, GOLD..."
+              className="w-full px-4 py-3 rounded-lg text-base"
+              style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              autoComplete="off"
+            />
+
+            <div
+              className="mt-2 max-h-52 overflow-y-auto rounded-lg"
+              style={{ border: '1px solid #363a45', background: '#252832' }}
+            >
+              {(symbols || [])
+                .filter((s) => {
+                  const q = orderSymbolSearch.trim().toLowerCase();
+                  if (!q) return true;
+                  return (
+                    String(s.symbol).toLowerCase().includes(q) ||
+                    String(s.display_name || '').toLowerCase().includes(q)
+                  );
+                })
+                .slice(0, 50)
+                .map((s) => (
+                  <button
+                    key={s.symbol}
+                    onClick={() => {
+                      setSelectedSymbol(s.symbol);
+                      setOrderSymbolSearch('');
+                    }}
+                    className="w-full text-left px-4 py-2 hover:bg-white/5"
+                    style={{ color: s.symbol === selectedSymbol ? '#2962ff' : '#d1d4dc' }}
+                  >
+                    <div className="font-semibold">{s.symbol}</div>
+                    <div className="text-xs" style={{ color: '#787b86' }}>{s.display_name}</div>
+                  </button>
+                ))}
+            </div>
+
+            <div className="mt-2 text-xs" style={{ color: '#787b86' }}>
+              Selected: <span style={{ color: '#d1d4dc', fontWeight: 700 }}>{selectedSymbol}</span>
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div className="flex items-center justify-between p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+              <span className="font-bold text-lg" style={{ color: '#d1d4dc' }}>{selectedSymbol}</span>
+              <div className="text-right">
+                <div className="text-base font-medium" style={{ color: '#ef5350' }}>Bid: {bid.toFixed(2)}</div>
+                <div className="text-base font-medium" style={{ color: '#26a69a' }}>Ask: {ask.toFixed(2)}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Order Type</label>
+            <select
+              value={orderType}
+              onChange={(e) => setOrderType(e.target.value)}
+              className="w-full px-4 py-3 rounded-lg text-base"
+              style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+            >
+              <option value="market">Market</option>
+            </select>
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Quantity</label>
+            <input
+              type="number"
+              value={quantity}
+              onChange={(e) => setQuantity(Math.max(1, Number(e.target.value || 1)))}
+              className="w-full px-4 py-3 rounded-lg text-xl font-bold text-center"
+              style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              min="1"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Stop Loss</label>
+              <input
+                type="number"
+                value={stopLoss}
+                onChange={(e) => setStopLoss(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg text-base"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                placeholder="0.00"
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Take Profit</label>
+              <input
+                type="number"
+                value={takeProfit}
+                onChange={(e) => setTakeProfit(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg text-base"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                placeholder="0.00"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div
+          className="sticky bottom-0 p-4 border-t shrink-0"
+          style={{ borderColor: '#363a45', background: '#1e222d' }}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={() => placeOrderWithQty('sell', quantity)}
+              className="py-4 rounded-lg font-bold text-white text-xl"
+              style={{ background: '#ef5350' }}
+            >
+              SELL
+            </button>
+            <button
+              onClick={() => placeOrderWithQty('buy', quantity)}
+              className="py-4 rounded-lg font-bold text-white text-xl"
+              style={{ background: '#26a69a' }}
+            >
+              BUY
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ============ MODIFY POSITION MODAL ============
+  const ModifyPositionModal = ({ trade }) => {
+    const [newSL, setNewSL] = useState(trade.stop_loss || '');
+    const [newTP, setNewTP] = useState(trade.take_profit || '');
+
+    const currentPrice = Number(trade.current_price || trade.open_price || 0);
+    const leverage = accountStats.leverage || 5;
+    const estimatedMargin = addQty > 0 ? (currentPrice * addQty) / leverage : 0;
+
+    const handleAddQuantity = async () => {
+      if (!addQty || addQty <= 0) {
+        return toast.error('Enter a valid quantity');
+      }
+
+      setAddQtyLoading(true);
+      const result = await addQuantity(trade.id, selectedAccount?.id, addQty);
+      setAddQtyLoading(false);
+
+      if (result.success) {
+        toast.success(result.message);
+        setModifyModal(null);
+        fetchOpenTrades(selectedAccount.id);
+      } else {
+        toast.error(result.message || 'Failed to add quantity');
+      }
+    };
+
+    return (
+      <div
+        className="fixed inset-0 z-[9999] bg-black/60 flex items-center justify-center p-4"
+        onClick={() => setModifyModal(null)}
+      >
+        <div
+          className="w-full max-w-sm rounded-xl"
+          style={{ background: '#1e222d', border: '1px solid #363a45' }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+            <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Modify Position</h3>
+            <button onClick={() => setModifyModal(null)}>
+              <X size={22} color="#787b86" />
+            </button>
+          </div>
+
+          <div className="p-4 pb-0">
+            <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+              <div className="text-sm" style={{ color: '#787b86' }}>Symbol</div>
+              <div className="font-bold text-lg" style={{ color: '#d1d4dc' }}>{trade.symbol}</div>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-sm" style={{ color: trade.trade_type === 'buy' ? '#26a69a' : '#ef5350' }}>
+                  {trade.trade_type?.toUpperCase()} • Qty: {trade.quantity}
+                </span>
+                <span className="text-sm" style={{ color: '#787b86' }}>
+                  @ {formatINR(trade.open_price)}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex mx-4 mt-3 rounded-lg overflow-hidden" style={{ border: '1px solid #363a45' }}>
+            <button
+              type="button"
+              onClick={() => setModifyTab('sltp')}
+              className="flex-1 py-2.5 text-sm font-medium transition-colors"
+              style={{
+                background: modifyTab === 'sltp' ? '#2962ff' : '#2a2e39',
+                color: modifyTab === 'sltp' ? '#fff' : '#787b86',
+              }}
+            >
+              SL / TP
+            </button>
+            <button
+              type="button"
+              onClick={() => setModifyTab('addqty')}
+              className="flex-1 py-2.5 text-sm font-medium transition-colors"
+              style={{
+                background: modifyTab === 'addqty' ? '#2962ff' : '#2a2e39',
+                color: modifyTab === 'addqty' ? '#fff' : '#787b86',
+              }}
+            >
+              + Add Quantity
+            </button>
+          </div>
+
+          <div className="p-4 space-y-4">
+            {modifyTab === 'sltp' && (
+              <>
+                <div>
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Stop Loss</label>
+                  <input
+                    type="number"
+                    value={newSL}
+                    onChange={(e) => setNewSL(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg text-base"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Take Profit</label>
+                  <input
+                    type="number"
+                    value={newTP}
+                    onChange={(e) => setNewTP(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg text-base"
+                    style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                    placeholder="0.00"
+                  />
+                </div>
+                <button
+                  onClick={() => handleModifyTrade(trade.id, newSL, newTP)}
+                  className="w-full py-3.5 rounded-lg font-semibold text-base"
+                  style={{ background: '#2962ff', color: '#fff' }}
+                >
+                  Modify SL / TP
+                </button>
+              </>
+            )}
+
+            {modifyTab === 'addqty' && (
+              <>
+                {closingMode && (
+                  <div className="p-3 rounded-lg flex items-center gap-2" style={{ background: '#ff980020', border: '1px solid #ff980050' }}>
+                    <AlertTriangle size={18} color="#ff9800" />
+                    <div className="text-sm" style={{ color: '#ff9800' }}>
+                      Closing mode is active. You cannot add quantity.
+                    </div>
+                  </div>
+                )}
+
+                {!closingMode && (
+                  <>
+                    <div>
+                      <label className="block text-sm mb-2" style={{ color: '#787b86' }}>
+                        Additional Quantity
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAddQty(Math.max(1, addQty - 1))}
+                          className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold"
+                          style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                        >
+                          −
+                        </button>
+                        <input
+                          type="number"
+                          value={addQty}
+                          onChange={(e) => setAddQty(Math.max(1, Number(e.target.value || 1)))}
+                          className="flex-1 px-4 py-3 rounded-lg text-xl font-bold text-center"
+                          style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                          min="1"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setAddQty(addQty + 1)}
+                          className="w-12 h-12 rounded-lg flex items-center justify-center text-xl font-bold"
+                          style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2">
+                      {[1, 5, 10, 25, 50].map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setAddQty(q)}
+                          className="flex-1 py-2 rounded-lg text-sm font-medium"
+                          style={{
+                            background: addQty === q ? '#2962ff' : '#2a2e39',
+                            color: addQty === q ? '#fff' : '#787b86',
+                            border: '1px solid #363a45',
+                          }}
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="p-3 rounded-lg space-y-2" style={{ background: '#252832', border: '1px solid #363a45' }}>
+                      <div className="flex justify-between text-sm">
+                        <span style={{ color: '#787b86' }}>Current Price</span>
+                        <span style={{ color: '#d1d4dc' }}>{formatINR(currentPrice)}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span style={{ color: '#787b86' }}>Add Quantity</span>
+                        <span style={{ color: '#d1d4dc' }}>{addQty}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span style={{ color: '#787b86' }}>Est. Additional Margin</span>
+                        <span style={{ color: '#f5c542' }}>{formatINR(estimatedMargin)}</span>
+                      </div>
+                      <div className="flex justify-between text-sm pt-2 border-t" style={{ borderColor: '#363a45' }}>
+                        <span style={{ color: '#787b86' }}>New Total Qty</span>
+                        <span className="font-bold" style={{ color: '#d1d4dc' }}>
+                          {Number(trade.quantity) + addQty}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span style={{ color: '#787b86' }}>Free Margin</span>
+                        <span style={{ color: accountStats.freeMargin >= estimatedMargin ? '#26a69a' : '#ef5350' }}>
+                          {formatINR(accountStats.freeMargin)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {estimatedMargin > accountStats.freeMargin && (
+                      <div className="p-2 rounded-lg flex items-center gap-2" style={{ background: '#ef535020' }}>
+                        <AlertTriangle size={16} color="#ef5350" />
+                        <span className="text-xs" style={{ color: '#ef5350' }}>
+                          Insufficient free margin
+                        </span>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handleAddQuantity}
+                      disabled={addQtyLoading || addQty <= 0 || estimatedMargin > accountStats.freeMargin}
+                      className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50"
+                      style={{
+                        background: trade.trade_type === 'buy' ? '#26a69a' : '#ef5350',
+                        color: '#fff',
+                      }}
+                    >
+                      {addQtyLoading
+                        ? 'Adding...'
+                        : `Add ${addQty} to ${trade.trade_type?.toUpperCase()} Position`}
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============ TRADE TAB ============
+  const TradeTab = () => (
+    <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+      <div className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+        <div className="grid grid-cols-3 gap-2 text-center mb-3">
+          <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+            <div className="text-xs font-medium" style={{ color: '#787b86' }}>Balance</div>
+            <div className="font-bold text-base" style={{ color: '#d1d4dc' }}>{formatINR(accountStats.balance)}</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+            <div className="text-xs font-medium" style={{ color: '#787b86' }}>Equity</div>
+            <div className="font-bold text-base" style={{ color: '#d1d4dc' }}>{formatINR(accountStats.equity)}</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{ background: '#2a2e39' }}>
+            <div className="text-xs font-medium" style={{ color: '#787b86' }}>Floating P&L</div>
+            <div className="font-bold text-base" style={{ color: totalPnL >= 0 ? '#26a69a' : '#ef5350' }}>
+              {totalPnL >= 0 ? '+' : ''}{formatINR(totalPnL)}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 text-center">
+          <div className="p-2 rounded-lg" style={{ background: '#252832' }}>
+            <div className="text-[10px] font-medium" style={{ color: '#787b86' }}>Margin</div>
+            <div className="font-semibold text-sm" style={{ color: '#f5c542' }}>{formatINR(accountStats.margin)}</div>
+          </div>
+          <div className="p-2 rounded-lg" style={{ background: '#252832' }}>
+            <div className="text-[10px] font-medium" style={{ color: '#787b86' }}>Free Margin</div>
+            <div className="font-semibold text-sm" style={{ color: '#26a69a' }}>{formatINR(accountStats.freeMargin)}</div>
+          </div>
+          <div className="p-2 rounded-lg" style={{ background: '#252832' }}>
+            <div className="text-[10px] font-medium" style={{ color: '#787b86' }}>Margin Lvl</div>
+            <div className="font-semibold text-sm" style={{ color: accountStats.marginLevel > 100 ? '#26a69a' : '#ef5350' }}>
+              {accountStats.margin > 0 ? `${accountStats.marginLevel.toFixed(0)}%` : '∞'}
+            </div>
+          </div>
+          <div className="p-2 rounded-lg" style={{ background: '#252832' }}>
+            <div className="text-[10px] font-medium" style={{ color: '#787b86' }}>Leverage</div>
+            <div className="font-semibold text-sm" style={{ color: '#2962ff' }}>1:{accountStats.leverage}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex border-b" style={{ borderColor: '#363a45' }}>
+        {[
+          { id: 'positions', label: `Positions (${openTrades.length})` },
+          { id: 'pending', label: `Pending (${pendingOrders?.length || 0})` },
+          { id: 'summary', label: 'Summary' },
+        ].map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setTradeTabSection(tab.id)}
+            className="flex-1 py-3 text-sm font-medium border-b-2"
+            style={{
+              color: tradeTabSection === tab.id ? '#2962ff' : '#787b86',
+              borderColor: tradeTabSection === tab.id ? '#2962ff' : 'transparent',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {tradeTabSection === 'positions' && (
+          <>
+            <div className="flex gap-2 p-3 border-b" style={{ borderColor: '#363a45' }}>
+              {closingMode && (
+                <div className="flex-1 p-2 rounded-lg flex items-center gap-2" style={{ background: '#ff980020' }}>
+                  <Lock size={16} color="#ff9800" />
+                  <span className="text-xs" style={{ color: '#ff9800' }}>
+                    Closing mode active - You can only close existing positions
+                  </span>
+                </div>
+              )}
+              {!closingMode && (
+                <button
+                  onClick={() => setShowOrderModal(true)}
+                  className="flex-1 py-2.5 rounded-lg text-sm font-semibold"
+                  style={{ background: '#2962ff', color: '#fff' }}
+                >
+                  + New Order
+                </button>
+              )}
+            </div>
+
+            {openTrades.length === 0 ? (
+              <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                <TrendingUp size={48} className="mx-auto mb-3 opacity-30" />
+                <div className="text-base">No open positions</div>
+              </div>
+            ) : (
+              openTrades.map((trade) => {
+                const pnl = Number(trade.profit || 0);
+                const isProfit = pnl >= 0;
+                const isExpanded = expandedTradeId === trade.id;
+
+                return (
+                  <div
+                    key={trade.id}
+                    className="border-b"
+                    style={{ borderColor: '#363a45', background: isExpanded ? '#252832' : 'transparent' }}
+                  >
+                    <div
+                      className="p-3 cursor-pointer"
+                      onClick={() => setExpandedTradeId(isExpanded ? null : trade.id)}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-2">
+                          <div
+                            className="w-8 h-8 rounded-full flex items-center justify-center"
+                            style={{ background: trade.trade_type === 'buy' ? '#26a69a20' : '#ef535020' }}
+                          >
+                            {trade.trade_type === 'buy' ? (
+                              <TrendingUp size={16} color="#26a69a" />
+                            ) : (
+                              <TrendingDown size={16} color="#ef5350" />
+                            )}
+                          </div>
+                          <div>
+                            <div className="font-bold text-base" style={{ color: '#d1d4dc' }}>{trade.symbol}</div>
+                            <div className="text-xs" style={{ color: '#787b86' }}>
+                              {String(trade.trade_type || '').toUpperCase()} • Qty {trade.quantity}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <div className="font-bold text-lg" style={{ color: isProfit ? '#26a69a' : '#ef5350' }}>
+                            {isProfit ? '+' : ''}{formatINR(pnl)}
+                          </div>
+                          <div className="text-xs" style={{ color: '#787b86' }}>
+                            {isExpanded ? <ChevronUp size={14} className="inline" /> : <ChevronDown size={14} className="inline" />}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between text-xs mt-2" style={{ color: '#787b86' }}>
+                        <span>Open: {formatINR(trade.open_price)}</span>
+                        <span>Current: {formatINR(trade.current_price || trade.open_price)}</span>
+                      </div>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="px-3 pb-3 pt-1" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setModifyTab('sltp');
+                              setAddQty(1);
+                              setAddQtyLoading(false);
+                              setModifyModal(trade);
+                            }}
+                            className="flex-1 py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                            style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
+                          >
+                            <Edit3 size={16} />
+                            Modify
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // ✅ Reset close states before opening
+                              setIsPartialClose(false);
+                              setCloseQty(Number(trade.quantity));
+                              setCloseConfirmTrade(trade);
+                            }}
+                            className="flex-1 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2"
+                            style={{ background: '#ef5350', color: '#fff' }}
+                          >
+                            <X size={16} />
+                            Close
+                          </button>
+                        </div>
+
+                        {(trade.stop_loss > 0 || trade.take_profit > 0) && (
+                          <div className="flex gap-4 mt-2 text-xs" style={{ color: '#787b86' }}>
+                            {trade.stop_loss > 0 && (
+                              <span>SL: <span style={{ color: '#ef5350' }}>{formatINR(trade.stop_loss)}</span></span>
+                            )}
+                            {trade.take_profit > 0 && (
+                              <span>TP: <span style={{ color: '#26a69a' }}>{formatINR(trade.take_profit)}</span></span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </>
+        )}
+
+        {tradeTabSection === 'pending' && (
+          <div className="p-6 text-center" style={{ color: '#787b86' }}>
+            {pendingOrders?.length ? (
+              <div>
+                {pendingOrders.map((o) => (
+                  <div key={o.id} className="p-3 rounded-lg mb-2 text-left" style={{ background: '#2a2e39' }}>
+                    <div className="flex justify-between">
+                      <span style={{ color: '#d1d4dc', fontWeight: 700 }}>{o.symbol}</span>
+                      <span className="text-xs px-2 py-0.5 rounded" style={{ background: '#f5c54220', color: '#f5c542' }}>
+                        {o.status || 'pending'}
+                      </span>
+                    </div>
+                    <div className="text-sm mt-1" style={{ color: '#787b86' }}>
+                      {o.order_type} | Qty {o.quantity} | @ {Number(o.price || 0).toFixed(2)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div>
+                <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                <div className="text-base">No pending orders</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tradeTabSection === 'summary' && (
+          <div className="p-4 space-y-3">
+            <div className="p-4 rounded-lg" style={{ background: '#2a2e39' }}>
+              <div className="text-sm font-semibold mb-3" style={{ color: '#d1d4dc' }}>Account Summary</div>
+
+              <div className="space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: '#787b86' }}>Balance</span>
+                  <span style={{ color: '#d1d4dc' }}>{formatINR(accountStats.balance)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: '#787b86' }}>Equity</span>
+                  <span style={{ color: '#d1d4dc' }}>{formatINR(accountStats.equity)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: '#787b86' }}>Used Margin</span>
+                  <span style={{ color: '#f5c542' }}>{formatINR(accountStats.margin)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: '#787b86' }}>Free Margin</span>
+                  <span style={{ color: '#26a69a' }}>{formatINR(accountStats.freeMargin)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: '#787b86' }}>Margin Level</span>
+                  <span style={{ color: accountStats.marginLevel > 100 ? '#26a69a' : '#ef5350' }}>
+                    {accountStats.margin > 0 ? `${accountStats.marginLevel.toFixed(2)}%` : '∞'}
+                  </span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span style={{ color: '#787b86' }}>Leverage</span>
+                  <span style={{ color: '#2962ff' }}>1:{accountStats.leverage}</span>
+                </div>
+                <div className="flex justify-between text-sm pt-2 border-t" style={{ borderColor: '#363a45' }}>
+                  <span style={{ color: '#787b86' }}>Floating P&L</span>
+                  <span className="font-bold" style={{ color: totalPnL >= 0 ? '#26a69a' : '#ef5350' }}>
+                    {totalPnL >= 0 ? '+' : ''}{formatINR(totalPnL)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {accountStats.margin > 0 && accountStats.marginLevel < 150 && (
+              <div className="p-3 rounded-lg flex items-center gap-2" style={{ background: '#ef535020', border: '1px solid #ef535050' }}>
+                <AlertTriangle size={20} color="#ef5350" />
+                <div className="text-sm" style={{ color: '#ef5350' }}>
+                  Low margin level. Consider closing some positions.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {showOrderModal && <OrderModal />}
+      {modifyModal && <ModifyPositionModal trade={modifyModal} />}
+      {closeConfirmTrade && <CloseConfirmModal />}
+    </div>
+  );
+
+  // ============ HISTORY TAB ============
+  const HistoryTab = () => {
+    const uniqueSymbols = useMemo(() => {
+      const syms = new Set(tradeHistory.map((t) => t.symbol));
+      return Array.from(syms).sort();
+    }, [tradeHistory]);
+
+    const overallStats = useMemo(() => {
+      let filtered = filteredHistoryTrades;
+      if (historyLocalSymbolFilter) {
+        filtered = filtered.filter((t) => t.symbol === historyLocalSymbolFilter);
+      }
+      const totalProfit = filtered
+        .filter((t) => Number(t.profit || 0) > 0)
+        .reduce((sum, t) => sum + Number(t.profit || 0), 0);
+      const totalLoss = Math.abs(
+        filtered.filter((t) => Number(t.profit || 0) < 0).reduce((sum, t) => sum + Number(t.profit || 0), 0)
+      );
+      const netPnL = totalProfit - totalLoss;
+      return { totalProfit, totalLoss, netPnL, count: filtered.length };
+    }, [filteredHistoryTrades, historyLocalSymbolFilter]);
+
+    const displayTrades = useMemo(() => {
+      if (!historyLocalSymbolFilter) return filteredHistoryTrades;
+      return filteredHistoryTrades.filter((t) => t.symbol === historyLocalSymbolFilter);
+    }, [filteredHistoryTrades, historyLocalSymbolFilter]);
+
+    return (
+      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+        <div className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+          <div className="flex gap-1 overflow-x-auto pb-2">
+            {HISTORY_PERIODS.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setHistoryPeriod(p.id)}
+                className="px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
+                style={{
+                  background: historyPeriod === p.id ? '#2962ff' : '#2a2e39',
+                  color: historyPeriod === p.id ? '#fff' : '#787b86',
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex gap-2 mt-2">
+            {[
+              { id: 'positions', label: 'Positions' },
+              { id: 'deals', label: 'Deals' },
+            ].map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setHistoryViewMode(m.id)}
+                className="flex-1 py-2.5 rounded-lg text-sm font-medium"
+                style={{
+                  background: historyViewMode === m.id ? '#2a2e39' : 'transparent',
+                  color: historyViewMode === m.id ? '#d1d4dc' : '#787b86',
+                  border: `1px solid ${historyViewMode === m.id ? '#363a45' : 'transparent'}`,
+                }}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+
+          {historyViewMode === 'positions' && (
+            <div className="mt-2 relative" ref={historyDropdownRef}>
+              <button
+                onClick={() => setShowHistorySymbolDropdown(!showHistorySymbolDropdown)}
+                className="w-full px-3 py-2 rounded-lg text-sm text-left flex items-center justify-between"
+                style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              >
+                <span>{historyLocalSymbolFilter || 'All Symbols'}</span>
+                <ChevronDown size={16} color="#787b86" />
+              </button>
+
+              {showHistorySymbolDropdown && (
+                <div
+                  className="absolute top-full left-0 right-0 mt-1 rounded-lg overflow-hidden z-20 max-h-60 overflow-y-auto"
+                  style={{ background: '#2a2e39', border: '1px solid #363a45' }}
+                >
+                  <button
+                    onClick={() => {
+                      setHistoryLocalSymbolFilter('');
+                      setShowHistorySymbolDropdown(false);
+                    }}
+                    className="w-full px-3 py-2 text-left text-sm hover:bg-white/5"
+                    style={{ color: !historyLocalSymbolFilter ? '#2962ff' : '#d1d4dc' }}
+                  >
+                    All Symbols
+                  </button>
+                  {uniqueSymbols.map((sym) => (
+                    <button
+                      key={sym}
+                      onClick={() => {
+                        setHistoryLocalSymbolFilter(sym);
+                        setShowHistorySymbolDropdown(false);
+                      }}
+                      className="w-full px-3 py-2 text-left text-sm hover:bg-white/5"
+                      style={{ color: historyLocalSymbolFilter === sym ? '#2962ff' : '#d1d4dc' }}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {historyViewMode === 'positions' && (
+          <div className="p-3 border-b grid grid-cols-3 gap-2 text-center" style={{ borderColor: '#363a45', background: '#252832' }}>
+            <div>
+              <div className="text-xs" style={{ color: '#787b86' }}>Trades</div>
+              <div className="font-bold" style={{ color: '#d1d4dc' }}>{overallStats.count}</div>
+            </div>
+            <div>
+              <div className="text-xs" style={{ color: '#787b86' }}>Profit</div>
+              <div className="font-bold" style={{ color: '#26a69a' }}>+{formatINR(overallStats.totalProfit)}</div>
+            </div>
+            <div>
+              <div className="text-xs" style={{ color: '#787b86' }}>Loss</div>
+              <div className="font-bold" style={{ color: '#ef5350' }}>-{formatINR(overallStats.totalLoss)}</div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto">
+          {historyViewMode === 'positions' && (
+            <>
+              {displayTrades.length === 0 ? (
+                <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base">No closed positions</div>
+                </div>
+              ) : (
+                displayTrades.map((t) => {
+                  const pnl = Number(t.profit || 0);
+                  return (
+                    <div key={t.id} className="p-3 border-b" style={{ borderColor: '#363a45' }}>
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="font-bold text-base" style={{ color: '#d1d4dc' }}>{t.symbol}</div>
+                          <div className="text-sm" style={{ color: '#787b86' }}>
+                            {String(t.trade_type || '').toUpperCase()} • Qty {t.quantity}
+                          </div>
+                          <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                            {t.close_time ? new Date(t.close_time).toLocaleString() : ''}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-bold text-lg" style={{ color: pnl >= 0 ? '#26a69a' : '#ef5350' }}>
+                            {pnl >= 0 ? '+' : ''}{formatINR(pnl)}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex gap-4 mt-2 text-xs" style={{ color: '#787b86' }}>
+                        <span>Open: {Number(t.open_price || 0).toFixed(2)}</span>
+                        <span>Close: {Number(t.close_price || 0).toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </>
+          )}
+
+          {historyViewMode === 'deals' && (
+            <>
+              {dealsSummary && (
+                <div className="p-3 border-b" style={{ borderColor: '#363a45', background: '#252832' }}>
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex justify-between">
+                      <span style={{ color: '#787b86' }}>Profit:</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSummary.totalProfit)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span style={{ color: '#787b86' }}>Loss:</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSummary.totalLoss)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span style={{ color: '#787b86' }}>Deposits:</span>
+                      <span style={{ color: '#26a69a' }}>+{formatINR(dealsSummary.totalDeposits)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span style={{ color: '#787b86' }}>Withdrawals:</span>
+                      <span style={{ color: '#ef5350' }}>-{formatINR(dealsSummary.totalWithdrawals)}</span>
+                    </div>
+                    <div className="flex justify-between col-span-2 pt-2 border-t" style={{ borderColor: '#363a45' }}>
+                      <span style={{ color: '#787b86' }}>Total Commission:</span>
+                      <span className="font-bold" style={{ color: '#f5c542' }}>{formatINR(dealsSummary.totalCommission)}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {(!deals || deals.length === 0) && (
+                <div className="p-8 text-center" style={{ color: '#787b86' }}>
+                  <Clock size={48} className="mx-auto mb-3 opacity-30" />
+                  <div className="text-base">No deals found</div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ============ MESSAGES TAB ============
+  const MessagesTab = () => (
+    <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+      <div className="p-4 border-b" style={{ borderColor: '#363a45' }}>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-bold text-xl" style={{ color: '#d1d4dc' }}>Messages</h2>
+          <button
+            className="text-sm font-medium px-3 py-1.5 rounded-lg"
+            style={{ background: '#2a2e39', color: '#2962ff' }}
+            onClick={markAllRead}
+          >
+            Mark All Read
+          </button>
+        </div>
+
+        <div className="flex gap-2 overflow-x-auto">
+          {[
+            { id: 'all', label: 'All' },
+            { id: 'system', label: 'System' },
+            { id: 'trade', label: 'Trade' },
+          ].map((c) => (
+            <button
+              key={c.id}
+              onClick={() => setMessageCategory(c.id)}
+              className="px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap"
+              style={{
+                background: messageCategory === c.id ? '#2962ff' : '#2a2e39',
+                color: messageCategory === c.id ? '#fff' : '#787b86',
+              }}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {filteredMessages.length === 0 ? (
+          <div className="p-8 text-center" style={{ color: '#787b86' }}>
+            <MessageSquare size={48} className="mx-auto mb-3 opacity-30" />
+            <div className="text-base">No messages yet</div>
+          </div>
+        ) : (
+          filteredMessages.map((m) => (
+            <div
+              key={m.id}
+              className="p-4 border-b"
+              style={{
+                borderColor: '#363a45',
+                background: m.read ? 'transparent' : 'rgba(41, 98, 255, 0.06)',
+              }}
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-11 h-11 rounded-full flex items-center justify-center shrink-0" style={{ background: '#2a2e39' }}>
+                  {m.type === 'trade' ? <TrendingUp size={20} color="#26a69a" /> : <Bell size={20} color="#2962ff" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-base" style={{ color: '#d1d4dc' }}>
+                      {m.title}
+                    </span>
+                    <span className="text-xs" style={{ color: '#787b86' }}>
+                      {m.time ? new Date(m.time).toLocaleTimeString() : ''}
+                    </span>
+                  </div>
+                  <p className="text-sm mt-1" style={{ color: '#787b86', wordBreak: 'break-word' }}>
+                    {m.message}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  // ============ ADD ACCOUNT MODAL ============
+  const AddAccountModal = () => (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+      onClick={() => setShowAddAccountModal(false)}
+    >
+      <div
+        className="w-full max-w-sm rounded-xl"
+        style={{ background: '#1e222d', border: '1px solid #363a45' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#363a45' }}>
+          <h3 className="font-bold text-lg" style={{ color: '#d1d4dc' }}>Add Account</h3>
+          <button onClick={() => setShowAddAccountModal(false)}>
+            <X size={22} color="#787b86" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-4">
+          <div className="p-3 rounded-lg flex items-start gap-2" style={{ background: '#2962ff20', border: '1px solid #2962ff50' }}>
+            <Info size={18} color="#2962ff" className="shrink-0 mt-0.5" />
+            <div className="text-sm" style={{ color: '#2962ff' }}>
+              Login with another account to save it for quick switching. Max {getMaxSavedAccounts()} accounts allowed.
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Email</label>
+            <input
+              type="email"
+              value={addAccountEmail}
+              onChange={(e) => setAddAccountEmail(e.target.value)}
+              className="w-full px-4 py-3 rounded-lg text-base"
+              style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              placeholder="user@example.com"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm mb-2" style={{ color: '#787b86' }}>Password</label>
+            <input
+              type="password"
+              value={addAccountPassword}
+              onChange={(e) => setAddAccountPassword(e.target.value)}
+              className="w-full px-4 py-3 rounded-lg text-base"
+              style={{ background: '#2a2e39', border: '1px solid #363a45', color: '#d1d4dc' }}
+              placeholder="••••••••"
+            />
+          </div>
+
+          <button
+            onClick={handleAddAccount}
+            disabled={addAccountLoading}
+            className="w-full py-3.5 rounded-lg font-semibold text-base disabled:opacity-50"
+            style={{ background: '#2962ff', color: '#fff' }}
+          >
+            {addAccountLoading ? 'Adding...' : 'Add Account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ============ SETTINGS TAB ============
+  const SettingsTab = () => {
+    const [showBal, setShowBal] = useState(true);
+    const maxAccounts = getMaxSavedAccounts();
+
+    return (
+      <div className="flex flex-col h-full" style={{ background: '#1e222d' }}>
+        <div className="p-4 border-b" style={{ borderColor: '#363a45' }}>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-semibold text-lg" style={{ color: '#d1d4dc' }}>
+                {user?.firstName} {user?.lastName}
+              </div>
+              <div className="text-sm" style={{ color: '#787b86' }}>
+                {user?.email}
+              </div>
+            </div>
+
+            <button onClick={logout} className="p-2.5 rounded-lg" style={{ background: '#2a2e39' }}>
+              <LogOut size={18} color="#787b86" />
+            </button>
+          </div>
+
+          <div className="flex gap-2 mt-4">
+            <button
+              onClick={switchToDemo}
+              className="flex-1 py-3 rounded-lg text-base font-semibold"
+              style={{
+                background: selectedAccount?.is_demo ? '#2962ff' : '#2a2e39',
+                color: selectedAccount?.is_demo ? '#fff' : '#787b86',
+                border: '1px solid #363a45',
+              }}
+            >
+              DEMO
+            </button>
+
+            <button
+              onClick={switchToLive}
+              className="flex-1 py-3 rounded-lg text-base font-semibold"
+              style={{
+                background: !selectedAccount?.is_demo ? '#26a69a' : '#2a2e39',
+                color: !selectedAccount?.is_demo ? '#fff' : '#787b86',
+                border: '1px solid #363a45',
+              }}
+            >
+              LIVE
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <div className="p-4 rounded-xl" style={{ background: '#2a2e39' }}>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm" style={{ color: '#787b86' }}>Balance</span>
+              <button onClick={() => setShowBal((v) => !v)}>
+                {showBal ? <Eye size={18} color="#787b86" /> : <EyeOff size={18} color="#787b86" />}
+              </button>
+            </div>
+
+            <div className="text-3xl font-bold" style={{ color: '#d1d4dc' }}>
+              {showBal ? formatINR(accountStats.balance) : '••••••'}
+            </div>
+
+            <div className="text-sm mt-2" style={{ color: '#787b86' }}>
+              Account: {selectedAccount?.account_number || '-'} • Leverage: 1:{accountStats.leverage}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              onClick={() => {
+                setWalletIntent('deposit');
+                setActiveTab('wallet');
+              }}
+              className="py-3.5 rounded-xl font-medium text-base flex items-center justify-center gap-2"
+              style={{ background: '#26a69a', color: '#fff' }}
+            >
+              <Plus size={20} />
+              Deposit
+            </button>
+
+            <button
+              onClick={() => {
+                setWalletIntent('withdraw');
+                setActiveTab('wallet');
+              }}
+              className="py-3.5 rounded-xl font-medium text-base flex items-center justify-center gap-2"
+              style={{ background: '#2a2e39', color: '#d1d4dc', border: '1px solid #363a45' }}
+            >
+              <RefreshCw size={20} />
+              Withdraw
+            </button>
+          </div>
+
+          <div className="p-4 rounded-xl" style={{ background: '#2a2e39' }}>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="font-medium" style={{ color: '#d1d4dc' }}>Theme</div>
+                <div className="text-xs" style={{ color: '#787b86' }}>
+                  Currently: {theme === 'dark' ? 'Dark Mode' : 'Light Mode'}
+                </div>
+              </div>
+              <button
+                onClick={toggleTheme}
+                className="px-4 py-2 rounded-lg font-medium text-sm"
+                style={{
+                  background: theme === 'dark' ? '#f5c54220' : '#2962ff20',
+                  color: theme === 'dark' ? '#f5c542' : '#2962ff',
+                  border: `1px solid ${theme === 'dark' ? '#f5c54250' : '#2962ff50'}`,
+                }}
+              >
+                {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
+              </button>
+            </div>
+            <div className="text-xs mt-2 p-2 rounded" style={{ background: '#1e222d', color: '#787b86' }}>
+              Note: Theme changes are saved but full visual theme support is coming soon.
+            </div>
+          </div>
+
+          <div className="rounded-xl overflow-hidden" style={{ background: '#2a2e39', border: '1px solid #363a45' }}>
+            <div className="p-4 border-b" style={{ borderColor: '#363a45' }}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Users size={18} color="#2962ff" />
+                  <span className="font-semibold text-base" style={{ color: '#d1d4dc' }}>
+                    Saved Accounts
+                  </span>
+                </div>
+                <span className="text-xs px-2 py-1 rounded" style={{ background: '#2962ff20', color: '#2962ff' }}>
+                  {savedAccounts.length}/{maxAccounts}
+                </span>
+              </div>
+              <div className="text-xs mt-1" style={{ color: '#787b86' }}>
+                Switch between accounts quickly without re-entering password
+              </div>
+            </div>
+
+            <div className="divide-y" style={{ borderColor: '#363a45' }}>
+              {savedAccounts.map((acc, idx) => {
+                const isActive = user?.loginId === acc.loginId || user?.email === acc.email;
+
+                return (
+                  <div
+                    key={acc.loginId || `${acc.email}-${idx}`}
+                    className="p-3 flex items-center justify-between"
+                    style={{ background: isActive ? '#2962ff10' : 'transparent' }}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold"
+                        style={{ background: isActive ? '#2962ff' : '#363a45', color: '#fff' }}
+                      >
+                        {acc.firstName?.[0]}{acc.lastName?.[0]}
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium" style={{ color: '#d1d4dc' }}>
+                          {acc.firstName} {acc.lastName}
+                          {isActive && (
+                            <span className="ml-2 text-xs px-1.5 py-0.5 rounded" style={{ background: '#26a69a20', color: '#26a69a' }}>
+                              Active
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs" style={{ color: '#787b86' }}>{acc.email}</div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {!isActive && (
+                        <button
+                          onClick={() => handleSwitchToSavedAccount(acc)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-medium"
+                          style={{ background: '#2962ff', color: '#fff' }}
+                        >
+                          Switch
+                        </button>
+                      )}
+                      {!isActive && (
+                        <button
+                          onClick={() => handleRemoveSavedAccount(acc.loginId || acc.email)}
+                          className="p-1.5 rounded hover:bg-red-500/20"
+                        >
+                          <Trash2 size={16} color="#ef5350" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {savedAccounts.length === 0 && (
+                <div className="p-4 text-center text-sm" style={{ color: '#787b86' }}>
+                  No saved accounts yet
+                </div>
+              )}
+            </div>
+
+            {savedAccounts.length < maxAccounts && (
+              <div className="p-3 border-t" style={{ borderColor: '#363a45' }}>
+                <button
+                  onClick={() => setShowAddAccountModal(true)}
+                  className="w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                  style={{ background: '#1e222d', color: '#2962ff', border: '1px dashed #2962ff50' }}
+                >
+                  <UserPlus size={18} />
+                  Add Another Account
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="p-4 rounded-xl flex items-start gap-3" style={{ background: '#2a2e39' }}>
+            <Info size={18} color="#787b86" className="shrink-0 mt-0.5" />
+            <div className="text-sm" style={{ color: '#787b86' }}>
+              You can log in from multiple devices simultaneously. Each device maintains its own session.
+            </div>
+          </div>
+        </div>
+
+        {showAddAccountModal && <AddAccountModal />}
+      </div>
+    );
+  };
+
+  // ============ MAIN RENDER ============
+  return (
+    <div className="h-screen flex flex-col" style={{ background: '#131722' }}>
+      <header
+        className="h-16 flex items-center justify-between px-4 border-b shrink-0"
+        style={{ background: '#1e222d', borderColor: '#363a45' }}
+      >
+        <div className="flex items-center gap-3">
+          <img
+            src="/logo.png"
+            alt="Trade Axis"
+            className="h-10 w-auto object-contain"
+            style={{ maxWidth: '44px' }}
+            onError={(e) => {
+              e.target.style.display = 'none';
+              e.target.nextSibling.style.display = 'flex';
+            }}
+          />
+          <div
+            className="h-10 w-10 rounded-lg items-center justify-center hidden"
+            style={{ background: 'linear-gradient(135deg, #26a69a 0%, #2962ff 100%)' }}
+          >
+            <span className="text-xl font-bold text-white">TA</span>
+          </div>
+
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-xl" style={{ color: '#26a69a' }}>Trade</span>
+              <span className="font-bold text-xl" style={{ color: '#2962ff' }}>Axis</span>
+            </div>
+            <div className="text-[10px] -mt-1 hidden sm:block" style={{ color: '#787b86' }}>
+              Indian Markets Terminal
+            </div>
+          </div>
+        </div>
+
+        <div className="text-base font-bold" style={{ color: totalPnL >= 0 ? '#26a69a' : '#ef5350' }}>
+          {totalPnL >= 0 ? '+' : ''}{formatINR(totalPnL)}
+        </div>
+
+        <div className="hidden lg:flex items-center gap-4">
+          <div className="text-sm" style={{ color: '#787b86' }}>
+            <span style={{ color: '#d1d4dc' }}>{selectedAccount?.account_number}</span>
+            <span
+              className="ml-2 px-2 py-0.5 rounded text-xs"
+              style={{
+                background: selectedAccount?.is_demo ? '#f5c54220' : '#26a69a20',
+                color: selectedAccount?.is_demo ? '#f5c542' : '#26a69a',
+              }}
+            >
+              {selectedAccount?.is_demo ? 'DEMO' : 'LIVE'}
+            </span>
+          </div>
+          <button
+            onClick={logout}
+            className="px-4 py-2 rounded-lg text-sm font-medium"
+            style={{ background: '#2a2e39', color: '#d1d4dc' }}
+          >
+            Logout
+          </button>
+        </div>
+      </header>
+
+      {/* Desktop */}
+      <div className="hidden lg:flex flex-1 overflow-hidden">
+        <DesktopTerminal
+          leftTop={
+            <MarketWatchPanel
+              symbols={symbols}
+              selectedSymbol={selectedSymbol}
+              onSelectSymbol={setSelectedSymbol}
+              watchlists={watchlists}
+              activeWatchlistId={activeWatchlistId}
+              activeSymbols={activeSymbols}
+              onSwitchWatchlist={handleSwitchWatchlist}
+              onCreateWatchlist={handleCreateWatchlist}
+              onToggleSymbol={toggleSymbolInWatchlist}
+            />
+          }
+          leftBottom={
+            <NavigatorPanel
+              accounts={accounts}
+              selectedAccount={selectedAccount}
+              onSelectAccount={setSelectedAccount}
+            />
+          }
+          centerTop={<ChartWorkspace symbol={selectedSymbol} />}
+          centerBottom={
+            <ToolboxPanel
+              accountId={selectedAccount?.id}
+              openTrades={openTrades}
+              tradeHistory={tradeHistory}
+              onCloseTrade={handleCloseTrade}
+            />
+          }
+          right={
+            <OrderDockPanel
+              symbol={selectedSymbol}
+              bid={bid}
+              ask={ask}
+              leverage={selectedAccount?.leverage || 5}
+              freeMargin={selectedAccount?.free_margin || 0}
+              onBuy={(qty) => placeOrderWithQty('buy', qty)}
+              onSell={(qty) => placeOrderWithQty('sell', qty)}
+            />
+          }
+        />
+      </div>
+
+      {/* Mobile */}
+      <div className="lg:hidden flex-1 overflow-hidden pb-16">
+        {activeTab === 'quotes' && <QuotesTab />}
+        {activeTab === 'chart' && <ChartTab />}
+        {activeTab === 'trade' && <TradeTab />}
+        {activeTab === 'history' && <HistoryTab />}
+        {activeTab === 'messages' && <MessagesTab />}
+        {activeTab === 'wallet' && (
+          <WalletPage selectedAccount={selectedAccount} user={user} intent={walletIntent} />
+        )}
+        {activeTab === 'settings' && <SettingsTab />}
+        {activeTab === 'admin' && isAdmin && <AdminPanelPage />}
+      </div>
+
+      <MobileNav />
+    </div>
+  );
+};
+
+export default Dashboard;
